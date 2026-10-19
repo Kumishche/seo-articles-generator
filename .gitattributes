@@ -1,0 +1,3 @@
+# Скрипты, которые запускаются внутри Linux-контейнеров
+*.sh text eol=lf
+back/mvnw text eol=lf

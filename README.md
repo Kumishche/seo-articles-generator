@@ -1,50 +1,31 @@
 # SEO Article AI
 
-Frontend информационной системы для подготовки SEO-статей с помощью ИИ.
-Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS 4. Данные пока mock.
+Информационная система для подготовки SEO-статей: анализ поисковой выдачи, структура,
+генерация текста с помощью OpenAI, редактирование и экспорт.
 
-## Запуск
+| Часть | Технологии | Документация |
+| --- | --- | --- |
+| [front/](front/) | Next.js 16, React 19, Tailwind CSS 4 | [front/README.md](front/README.md) |
+| [back/](back/) | Java 21+, Spring Boot 4, OpenAI Responses API | [back/README.md](back/README.md), [API](back/docs/openapi.yaml) |
+
+## Запуск в Docker
 
 ```bash
-npm install
-npm run dev      # http://localhost:3000
-npm run build    # production-сборка
+cp .env.example .env    # укажите OPENAI_API_KEY
+docker compose up --build
 ```
 
-## Экраны
+- Приложение: http://localhost:3000
+- Swagger UI backend: http://localhost:8080/swagger-ui.html
 
-| Маршрут | Экран |
-| --- | --- |
-| `/` | редирект на `/articles/new` |
-| `/articles/new` | Исходные данные: тема, требования, план, ссылки, файлы |
-| `/articles/demo/research` | Анализ выдачи, интент, ключи, конкуренты, редактируемая структура |
-| `/articles/demo/editor` | Редактор статьи, SEO-оценка, предпросмотр сниппета, публикация |
+Браузер обращается только к frontend: запросы `/api/*` Next.js проксирует в контейнер backend.
+Данные хранятся в памяти backend и пропадают при перезапуске контейнера.
 
-После нажатия «Начать анализ» на втором экране проигрывается состояние загрузки с этапами анализа.
-При прямом открытии сразу показывается результат. Кнопка «Повторить анализ» запускает загрузку снова.
+Переменные `.env`: `OPENAI_API_KEY` (обязательно), `OPENAI_MODEL`, `OPENAI_SEARCH_MODEL`,
+`OPENAI_BASE_URL` (прокси-шлюз к OpenAI), `SITE_DOMAIN` (домен в предпросмотре сниппета;
+подставляется при сборке, после изменения нужен `--build`).
 
-## Структура
+## Запуск без Docker
 
-```
-app/                 маршруты
-components/
-  layout/            AppShell, AppSidebar, AppHeader, StepIndicator, PageIntro
-  article/           ArticleForm, SourceList, FileUploader, HowItWorksCard
-  research/          SearchIntentCard, KeywordList, CompetitorList, RecommendationsCard,
-                     OutlineEditor, OutlineSummary, AnalysisProgress, ResearchWorkspace
-  editor/            ArticleEditor, EditorToolbar, EditorWorkspace
-  seo/               SeoScore, SeoChecklist, KeywordStats, SearchPreview, SourcesCard
-  publication/       PublishModal, RegenerateDialog
-  ui/                базовые компоненты (Button, Card, Badge, Field, Dialog, Toast)
-lib/
-  types.ts           модели данных (Article, ResearchResult, OutlineSection, SeoAnalysis, ...)
-  mock-data.ts       mock-данные
-  api.ts             слой доступа к данным
-```
-
-## Интеграция со Spring Boot
-
-Все обращения к данным идут через `lib/api.ts`. В комментарии к файлу перечислены
-ожидаемые REST-эндпоинты. Чтобы подключить backend, задайте `NEXT_PUBLIC_API_URL`
-(см. `.env.example`) и замените тела методов `articleApi` на вызовы `request()`.
-Типы в `lib/types.ts` соответствуют DTO.
+1. Backend: `cd back && ./mvnw spring-boot:run` (нужен JDK 21+ и `OPENAI_API_KEY` в окружении).
+2. Frontend: `cd front && npm install && npm run dev`.

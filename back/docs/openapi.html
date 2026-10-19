@@ -1,0 +1,896 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SEO Article AI API</title>
+<style>body{margin:0;background:#fff}</style>
+</head>
+<body>
+<div id="redoc"></div>
+<script type="text/yaml" id="spec">
+openapi: 3.0.3
+info:
+  title: SEO Article AI — Backend API
+  version: 0.1.0
+  description: |
+    REST API упрощенной версии системы подготовки SEO-статей.
+
+    Ограничения текущей версии:
+    - данные хранятся в памяти процесса (без PostgreSQL и MinIO), после перезапуска теряются;
+    - публикация на сайт не поддерживается, только экспорт файла (HTML, Markdown, TXT);
+    - аутентификации нет.
+
+    Флоу соответствует экранам фронтенда:
+    1. `POST /files` — загрузка файлов-источников (по одному, пока пользователь заполняет форму).
+    2. `POST /articles` — создание статьи, асинхронно запускается анализ выдачи.
+    3. `GET /articles/{id}/research` — опрос статуса анализа (status `pending` → `completed` | `failed`).
+    4. `PUT /articles/{id}/outline` — сохранение черновика структуры.
+    5. `POST /articles/{id}/generate` — генерация статьи по структуре.
+    6. `GET/PUT /articles/{id}` — просмотр и автосохранение в редакторе.
+    7. `POST /articles/{id}/paragraph-actions` — AI-правка абзаца.
+    8. `POST /articles/{id}/regenerate` — повторная генерация.
+    9. `GET /articles/{id}/export` — скачивание готового материала.
+
+    Даты — ISO 8601 (UTC), идентификаторы — строки.
+servers:
+  - url: http://localhost:8080/api
+    description: Локальный запуск (совпадает с NEXT_PUBLIC_API_URL во фронтенде)
+
+tags:
+  - name: Files
+    description: Загрузка файлов-источников
+  - name: Articles
+    description: Создание, просмотр и редактирование статей
+  - name: Research
+    description: Анализ поисковой выдачи и структура статьи
+  - name: Generation
+    description: Генерация и AI-правка текста
+  - name: Export
+    description: Экспорт готового материала
+
+paths:
+  /files:
+    post:
+      tags: [Files]
+      operationId: uploadFile
+      summary: Загрузить файл-источник
+      description: |
+        Принимает PDF, DOCX или TXT до 20 МБ, извлекает из него текст и хранит в памяти.
+        Возвращенный объект передается в `CreateArticleRequest.sources` как есть.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "201":
+          description: Файл загружен, текст извлечен
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArticleSource"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "413":
+          description: Файл больше 20 МБ
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "415":
+          description: Неподдерживаемый формат файла
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+
+  /files/{fileId}:
+    delete:
+      tags: [Files]
+      operationId: deleteFile
+      summary: Удалить загруженный файл
+      description: Вызывается, когда пользователь убирает файл из формы до создания статьи.
+      parameters:
+        - $ref: "#/components/parameters/FileId"
+      responses:
+        "204":
+          description: Файл удален
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /articles:
+    get:
+      tags: [Articles]
+      operationId: listArticles
+      summary: Список статей
+      description: Краткие сведения о всех статьях, отсортированные по `updatedAt` по убыванию.
+      responses:
+        "200":
+          description: Список статей
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ArticleSummary"
+    post:
+      tags: [Articles]
+      operationId: createArticle
+      summary: Создать статью и запустить анализ
+      description: |
+        Создает статью со статусом `analyzing` и асинхронно запускает анализ поисковой выдачи.
+        Прогресс отслеживается через `GET /articles/{id}/research`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateArticleRequest"
+      responses:
+        "202":
+          description: Статья создана, анализ запущен
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IdResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /articles/{articleId}:
+    parameters:
+      - $ref: "#/components/parameters/ArticleId"
+    get:
+      tags: [Articles]
+      operationId: getArticle
+      summary: Получить статью
+      responses:
+        "200":
+          description: Статья
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Article"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [Articles]
+      operationId: saveArticle
+      summary: Сохранить правки редактора
+      description: |
+        Частичное обновление: передаются только измененные поля.
+        После сохранения SEO-анализ пересчитывается и возвращается в ответе.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ArticlePatch"
+      responses:
+        "200":
+          description: Статья сохранена
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Article"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      tags: [Articles]
+      operationId: deleteArticle
+      summary: Удалить статью
+      responses:
+        "204":
+          description: Статья удалена
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /articles/{articleId}/research:
+    parameters:
+      - $ref: "#/components/parameters/ArticleId"
+    get:
+      tags: [Research]
+      operationId: getResearch
+      summary: Результат или прогресс анализа
+      description: |
+        Пока `status = pending`, заполнены только `articleId`, `status` и `progress`, остальные поля `null`.
+        Фронтенд опрашивает эндпоинт раз в 1-2 секунды и показывает `progress.stage`.
+      responses:
+        "200":
+          description: Состояние анализа
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResearchResult"
+              examples:
+                pending:
+                  value:
+                    articleId: 6f1c2a9e-5b1d-4a3e-9d2f-0b7c1e8a4f10
+                    status: pending
+                    articleStatus: analyzing
+                    generationError: null
+                    progress: { stage: 1, total: 5, label: "Изучаем страницы конкурентов..." }
+                    serpResultsAnalyzed: null
+                    competitorPagesAnalyzed: null
+                    intent: null
+                    keywords: null
+                    competitors: null
+                    recommendations: null
+                    outline: null
+                    error: null
+                    completedAt: null
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      tags: [Research]
+      operationId: restartResearch
+      summary: Повторить анализ
+      description: Кнопка «Повторить анализ». Сбрасывает предыдущий результат и запускает анализ заново.
+      responses:
+        "202":
+          description: Анализ перезапущен
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResearchResult"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /articles/{articleId}/outline:
+    parameters:
+      - $ref: "#/components/parameters/ArticleId"
+    put:
+      tags: [Research]
+      operationId: saveOutline
+      summary: Сохранить структуру статьи
+      description: Кнопка «Сохранить черновик» на экране анализа.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OutlineRequest"
+      responses:
+        "200":
+          description: Структура сохранена
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArticleOutline"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /articles/{articleId}/generate:
+    parameters:
+      - $ref: "#/components/parameters/ArticleId"
+    post:
+      tags: [Generation]
+      operationId: generateArticle
+      summary: Сгенерировать статью по структуре
+      description: |
+        Сохраняет переданную структуру и синхронно генерирует текст (обычно 30-90 секунд).
+        Требует завершенного анализа. Статья переходит в статус `review`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OutlineRequest"
+      responses:
+        "200":
+          description: Статья сгенерирована
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Article"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "502":
+          $ref: "#/components/responses/AiError"
+
+  /articles/{articleId}/regenerate:
+    parameters:
+      - $ref: "#/components/parameters/ArticleId"
+    post:
+      tags: [Generation]
+      operationId: regenerateArticle
+      summary: Сгенерировать статью заново
+      description: Генерирует новую версию по сохраненной структуре. Текущий текст заменяется.
+      responses:
+        "200":
+          description: Новая версия статьи
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Article"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "502":
+          $ref: "#/components/responses/AiError"
+
+  /articles/{articleId}/paragraph-actions:
+    parameters:
+      - $ref: "#/components/parameters/ArticleId"
+    post:
+      tags: [Generation]
+      operationId: applyParagraphAction
+      summary: AI-правка абзаца
+      description: |
+        Кнопки «Переписать», «Сократить», «Расширить», «Улучшить стиль» в редакторе.
+        Возвращает только новый текст абзаца; в статье ничего не сохраняется,
+        фронтенд вставляет результат и сохраняет статью обычным автосохранением.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ParagraphActionRequest"
+      responses:
+        "200":
+          description: Новый текст абзаца
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ParagraphActionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/AiError"
+
+  /articles/{articleId}/export:
+    parameters:
+      - $ref: "#/components/parameters/ArticleId"
+    get:
+      tags: [Export]
+      operationId: exportArticle
+      summary: Экспортировать статью в файл
+      description: |
+        Отдает последнюю сохраненную версию статьи. Перед вызовом фронтенд должен
+        дождаться автосохранения. Имя файла — `{slug}.{html|md|txt}`.
+      parameters:
+        - name: format
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/ExportFormat"
+      responses:
+        "200":
+          description: Файл статьи
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+              example: attachment; filename="kak-vybrat-crm-dlya-malogo-biznesa.html"
+          content:
+            text/html:
+              schema:
+                type: string
+            text/markdown:
+              schema:
+                type: string
+            text/plain:
+              schema:
+                type: string
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+components:
+  parameters:
+    ArticleId:
+      name: articleId
+      in: path
+      required: true
+      schema:
+        type: string
+    FileId:
+      name: fileId
+      in: path
+      required: true
+      schema:
+        type: string
+
+  responses:
+    BadRequest:
+      description: Некорректные данные запроса
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    NotFound:
+      description: Ресурс не найден
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Conflict:
+      description: Действие недоступно в текущем статусе статьи (например, анализ еще идет)
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    AiError:
+      description: Ошибка обращения к OpenAI API
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+
+  schemas:
+    IdResponse:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+
+    ArticleStatus:
+      type: string
+      description: |
+        `draft` — анализ не удался или не запускался; `analyzing` — идет анализ;
+        `structure_ready` — анализ завершен, структура редактируется;
+        `generating` — идет генерация; `review` — статья готова к проверке.
+        `published` в этой версии не используется.
+      enum: [draft, analyzing, structure_ready, generating, review, published]
+
+    HeadingLevel:
+      type: integer
+      enum: [1, 2, 3]
+
+    SearchIntentType:
+      type: string
+      enum: [informational, commercial, transactional, navigational]
+
+    Level:
+      type: string
+      enum: [high, medium, low]
+
+    ExportFormat:
+      type: string
+      enum: [html, markdown, txt]
+      default: html
+
+    ArticleSource:
+      type: object
+      required: [id, type, title, addedAt]
+      properties:
+        id:
+          type: string
+          description: Для файлов — id из `POST /files`, для ссылок — любой id, сгенерированный клиентом
+        type:
+          type: string
+          enum: [link, file]
+        title:
+          type: string
+          description: Для ссылок — полный URL, для файлов — имя файла
+        url:
+          type: string
+          format: uri
+          nullable: true
+        domain:
+          type: string
+          nullable: true
+        size:
+          type: integer
+          format: int64
+          nullable: true
+          description: Размер файла в байтах
+        mimeType:
+          type: string
+          nullable: true
+        addedAt:
+          type: string
+          format: date-time
+
+    CreateArticleRequest:
+      type: object
+      required: [topic]
+      properties:
+        topic:
+          type: string
+          minLength: 1
+          maxLength: 300
+          example: Как выбрать CRM для малого бизнеса
+        requirements:
+          type: string
+          maxLength: 4000
+          nullable: true
+          description: Аудитория, стиль, объем и другие пожелания
+        draftPlan:
+          type: string
+          maxLength: 4000
+          nullable: true
+          description: Предварительный план, по пункту на строку
+        sources:
+          type: array
+          maxItems: 20
+          default: []
+          items:
+            $ref: "#/components/schemas/ArticleSource"
+
+    OutlineSection:
+      type: object
+      required: [id, level, title]
+      properties:
+        id:
+          type: string
+        level:
+          $ref: "#/components/schemas/HeadingLevel"
+        title:
+          type: string
+
+    OutlineRequest:
+      type: object
+      required: [sections]
+      description: |
+        Первая секция — заголовок H1, далее H2/H3. Должен быть хотя бы один H2,
+        заголовки не пустые, H3 не может стоять сразу после H1.
+      properties:
+        sections:
+          type: array
+          minItems: 2
+          items:
+            $ref: "#/components/schemas/OutlineSection"
+
+    ArticleOutline:
+      type: object
+      required: [articleId, sections, estimatedWords, targetKeywords]
+      properties:
+        articleId:
+          type: string
+        sections:
+          type: array
+          items:
+            $ref: "#/components/schemas/OutlineSection"
+        estimatedWords:
+          $ref: "#/components/schemas/WordRange"
+        targetKeywords:
+          type: integer
+
+    WordRange:
+      type: object
+      required: [min, max]
+      properties:
+        min:
+          type: integer
+        max:
+          type: integer
+
+    CompetitorPage:
+      type: object
+      required: [id, domain, title, url, position, relevance]
+      properties:
+        id:
+          type: string
+        domain:
+          type: string
+        title:
+          type: string
+        url:
+          type: string
+          format: uri
+          description: |
+            Адрес из реальных результатов веб-поиска. Адреса, которых поиск не возвращал,
+            и страницы, отвечающие 404/410 или с несуществующим доменом, в выдачу не попадают.
+        position:
+          type: integer
+          description: Позиция в выдаче, начиная с 1
+        relevance:
+          $ref: "#/components/schemas/Level"
+
+    Keyword:
+      type: object
+      required: [phrase, kind]
+      properties:
+        phrase:
+          type: string
+        kind:
+          type: string
+          enum: [primary, secondary]
+
+    SearchIntent:
+      type: object
+      required: [type, description, confidence]
+      properties:
+        type:
+          $ref: "#/components/schemas/SearchIntentType"
+        description:
+          type: string
+        confidence:
+          $ref: "#/components/schemas/Level"
+
+    ResearchProgress:
+      type: object
+      required: [stage, total, label]
+      properties:
+        stage:
+          type: integer
+          description: Индекс текущего этапа, начиная с 0
+        total:
+          type: integer
+          example: 5
+        label:
+          type: string
+          example: Анализируем поисковую выдачу...
+
+    ResearchResult:
+      type: object
+      required: [articleId, status, articleStatus]
+      properties:
+        articleId:
+          type: string
+        status:
+          type: string
+          enum: [pending, completed, failed]
+        articleStatus:
+          allOf:
+            - $ref: "#/components/schemas/ArticleStatus"
+          description: |
+            Статус статьи. По нему экран структуры узнает, что статья уже генерируется
+            (`generating`) или готова (`review`), если пользователь уходил со страницы.
+        generationError:
+          type: string
+          nullable: true
+          description: Причина, по которой не удалась последняя генерация; сбрасывается при новом запуске
+        progress:
+          allOf:
+            - $ref: "#/components/schemas/ResearchProgress"
+          nullable: true
+          description: Заполнено, пока `status = pending`
+        serpResultsAnalyzed:
+          type: integer
+          nullable: true
+        competitorPagesAnalyzed:
+          type: integer
+          nullable: true
+        intent:
+          allOf:
+            - $ref: "#/components/schemas/SearchIntent"
+          nullable: true
+        keywords:
+          type: array
+          nullable: true
+          items:
+            $ref: "#/components/schemas/Keyword"
+        competitors:
+          type: array
+          nullable: true
+          items:
+            $ref: "#/components/schemas/CompetitorPage"
+        recommendations:
+          type: array
+          nullable: true
+          items:
+            type: string
+        outline:
+          allOf:
+            - $ref: "#/components/schemas/ArticleOutline"
+          nullable: true
+        error:
+          type: string
+          nullable: true
+          description: Причина ошибки, если `status = failed`
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    SeoCheck:
+      type: object
+      required: [id, label, status]
+      properties:
+        id:
+          type: string
+          enum: [intent, kw-title, kw-intro, density, length, headings, meta, links]
+        label:
+          type: string
+        status:
+          type: string
+          enum: [passed, warning, failed]
+        hint:
+          type: string
+          nullable: true
+
+    KeywordStat:
+      type: object
+      required: [phrase, target]
+      properties:
+        phrase:
+          type: string
+        target:
+          type: integer
+          description: Рекомендуемое число упоминаний
+
+    SeoAnalysis:
+      type: object
+      required: [score, maxScore, verdict, summary, checks, keywords]
+      properties:
+        score:
+          type: integer
+        maxScore:
+          type: integer
+          example: 100
+        verdict:
+          type: string
+          example: Хорошо
+        summary:
+          type: string
+        checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/SeoCheck"
+        keywords:
+          type: array
+          items:
+            $ref: "#/components/schemas/KeywordStat"
+
+    Article:
+      type: object
+      required:
+        [id, topic, status, title, content, seoTitle, metaDescription, slug, sources, usedSources, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        topic:
+          type: string
+        requirements:
+          type: string
+          nullable: true
+        draftPlan:
+          type: string
+          nullable: true
+        status:
+          $ref: "#/components/schemas/ArticleStatus"
+        title:
+          type: string
+          description: Заголовок H1 (до генерации совпадает с темой)
+        content:
+          type: string
+          description: HTML без H1. Допустимые теги — p, h2, h3, ul, ol, li, strong, em, a, blockquote, br
+        seoTitle:
+          type: string
+        metaDescription:
+          type: string
+        slug:
+          type: string
+          example: kak-vybrat-crm-dlya-malogo-biznesa
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/ArticleSource"
+        usedSources:
+          type: array
+          items:
+            $ref: "#/components/schemas/CompetitorPage"
+        seo:
+          allOf:
+            - $ref: "#/components/schemas/SeoAnalysis"
+          nullable: true
+          description: "`null`, пока статья не сгенерирована"
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    ArticleSummary:
+      type: object
+      required: [id, topic, title, status, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        topic:
+          type: string
+        title:
+          type: string
+        status:
+          $ref: "#/components/schemas/ArticleStatus"
+        seoScore:
+          type: integer
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    ArticlePatch:
+      type: object
+      description: Все поля необязательны; переданные поля заменяют текущие значения
+      properties:
+        title:
+          type: string
+          maxLength: 300
+        content:
+          type: string
+          maxLength: 500000
+        seoTitle:
+          type: string
+          maxLength: 300
+        metaDescription:
+          type: string
+          maxLength: 500
+        slug:
+          type: string
+          pattern: "^[a-z0-9]+(-[a-z0-9]+)*$"
+
+    ParagraphActionRequest:
+      type: object
+      required: [action, text]
+      properties:
+        action:
+          type: string
+          enum: [rewrite, shorten, expand, improve]
+        text:
+          type: string
+          minLength: 1
+          maxLength: 5000
+          description: Текущий текст абзаца (plain text)
+
+    ParagraphActionResponse:
+      type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+
+    Problem:
+      type: object
+      description: RFC 9457 Problem Details
+      properties:
+        type:
+          type: string
+          example: about:blank
+        title:
+          type: string
+          example: Conflict
+        status:
+          type: integer
+          example: 409
+        detail:
+          type: string
+          example: Анализ еще не завершен
+        instance:
+          type: string
+          example: /api/articles/6f1c2a9e/generate
+</script>
+<script src="https://cdn.jsdelivr.net/npm/js-yaml@4.1.0/dist/js-yaml.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/redoc@2.1.5/bundles/redoc.standalone.js"></script>
+<script>
+  var spec = jsyaml.load(document.getElementById("spec").textContent);
+  Redoc.init(spec, {
+    hideDownloadButton: false,
+    expandResponses: "200,201,202",
+    jsonSampleExpandLevel: 3,
+    theme: { colors: { primary: { main: "#4f46e5" } }, typography: { fontFamily: "system-ui, sans-serif", headings: { fontFamily: "system-ui, sans-serif" } } }
+  }, document.getElementById("redoc"));
+</script>
+</body>
+</html>

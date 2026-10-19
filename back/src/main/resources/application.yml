@@ -1,0 +1,35 @@
+server:
+  port: ${PORT:8080}
+
+spring:
+  application:
+    name: seo-article-ai
+  mvc:
+    problemdetails:
+      enabled: true
+  servlet:
+    multipart:
+      max-file-size: 20MB
+      max-request-size: 21MB
+
+app:
+  openai:
+    api-key: ${OPENAI_API_KEY:}
+    base-url: ${OPENAI_BASE_URL:}
+    model: ${OPENAI_MODEL:gpt-5-mini}
+    search-model: ${OPENAI_SEARCH_MODEL:${OPENAI_MODEL:gpt-5-mini}}
+    timeout: 4m
+  cors:
+    origins: ${CORS_ORIGINS:http://localhost:3000}
+  research:
+    serp-results: 10
+    fetch-timeout: 10s
+    page-excerpt-chars: 6000
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    # Показываем написанный вручную контракт docs/openapi.yaml, а не сгенерированный по коду
+    url: /openapi.yaml
